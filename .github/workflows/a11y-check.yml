@@ -1,0 +1,116 @@
+name: Accessibility Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '**.js'
+      - '**.jsx'
+      - '**.ts'
+      - '**.tsx'
+      - '**.html'
+      - '**.htm'
+      - '**.css'
+      - '**.scss'
+  workflow_dispatch:
+
+jobs:
+  a11y-check:
+    name: 🔍 Accessibility Review
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: 🔄 Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 📦 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: 📥 Install dependencies
+        run: npm ci
+
+      - name: 📊 Run accessibility scan
+        id: a11y
+        run: npx a11y-reviewer scan --ci --json
+        continue-on-error: true
+
+      - name: 📋 Post results to PR
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            // Read results
+            let results = null;
+            try {
+              const content = fs.readFileSync('.a11y/results/latest.json', 'utf8');
+              results = JSON.parse(content);
+            } catch (e) {
+              console.log('Warning: Could not read results file');
+              return;
+            }
+
+            // Build comment
+            let comment = '## 🔍 Accessibility Review Results\n\n';
+            comment += `**Files Analyzed**: ${results.summary?.filesAnalyzed ?? results.analyzedFiles ?? 0}\n`;
+            comment += `**Violations Found**: ${results.summary?.totalViolations || 0} (${results.summary?.errors || 0} errors, ${results.summary?.warnings || 0} warnings)\n\n`;
+
+            if (results.summary?.totalViolations === 0) {
+              comment += '✅ **No violations found!** This PR meets WCAG 2.2 AA standards.\n';
+            } else {
+              comment += '❌ **Violations detected. Please review and fix:**\n\n';
+
+              const fileResults = Array.isArray(results.results)
+                ? results.results
+                : (Array.isArray(results.files) ? results.files : []);
+
+              if (fileResults.length > 0) {
+                fileResults.forEach(file => {
+                  const violations = Array.isArray(file.violations) ? file.violations : [];
+                  const filePath = file.file || file.filePath || 'unknown-file';
+
+                  if (violations.length > 0) {
+                    comment += `### \`${filePath}\`\n`;
+                    violations.slice(0, 5).forEach((v, i) => {
+                      const severity = v.severity === 'error' ? '🔴' : '🟡';
+                      comment += `${i + 1}. ${severity} **${v.ruleId}** (Line ${v.line})\n`;
+                      if (v.message) comment += `   ${v.message}\n`;
+                    });
+                    if (violations.length > 5) {
+                      comment += `... and ${violations.length - 5} more violations\n`;
+                    }
+                    comment += '\n';
+                  }
+                });
+              }
+            }
+
+            comment += '\n📚 [WCAG 2.2 Quick Reference](https://www.w3.org/WAI/WCAG22/quickref/)';
+
+            // Post comment
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment,
+            });
+
+      - name: ✅ Report success
+        if: steps.a11y.outcome == 'success'
+        run: echo "Accessibility check passed!"
+
+      - name: ❌ Report failure
+        if: steps.a11y.outcome == 'failure'
+        run: |
+          echo "Accessibility check failed. Please fix violations before merging."
+          exit 1
